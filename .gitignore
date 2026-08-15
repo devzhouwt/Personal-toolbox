@@ -1,0 +1,13 @@
+# 依赖
+node_modules/
+
+# 构建产物
+dist/
+
+# 本地测试图片与验证截图
+scripts/*.png
+
+# 日志与系统文件
+*.log
+.DS_Store
+Thumbs.db
