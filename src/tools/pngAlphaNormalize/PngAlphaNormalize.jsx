@@ -1,26 +1,37 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Button,
   Card,
   Col,
   Descriptions,
+  Divider,
+  Empty,
+  List,
   Row,
   Space,
   Spin,
-  Statistic,
   Typography,
   Upload,
   message,
 } from 'antd';
 import {
   DownloadOutlined,
+  HistoryOutlined,
   InboxOutlined,
   ReloadOutlined,
 } from '@ant-design/icons';
+import {
+  getToolHistory,
+  isGiteeConfigured,
+  recordToolUsage,
+} from '../../services/history';
 
 const { Dragger } = Upload;
 const { Paragraph, Text } = Typography;
+
+/** 工具存档目录名（对应 Gitee 仓库 history/ 下的子目录） */
+const TOOL_ID = 'png-alpha-normalize';
 
 /** 棋盘格背景，用于直观展示透明区域 */
 const CHECKER_BOARD = {
@@ -85,6 +96,28 @@ export default function PngAlphaNormalize() {
   const [result, setResult] = useState(null); // { originalUrl, resultUrl, fileName, blob, stats }
   const originalUrlRef = useRef(null);
   const [messageApi, contextHolder] = message.useMessage();
+  const [historyRecords, setHistoryRecords] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState(null);
+
+  /** 从 Gitee 仓库加载本工具的历史记录（未配置或首次使用时不报错） */
+  async function loadHistory() {
+    if (!isGiteeConfigured()) return;
+    setHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      const data = await getToolHistory(TOOL_ID);
+      setHistoryRecords(data?.records ?? []);
+    } catch (err) {
+      setHistoryError(err.message);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadHistory();
+  }, []);
 
   /** 处理上传的 PNG 文件 */
   async function handleFile(file) {
@@ -121,6 +154,22 @@ export default function PngAlphaNormalize() {
         blob,
         stats,
       });
+
+      // 保存使用历史到 Gitee 仓库（失败不阻断主流程）
+      try {
+        const ret = await recordToolUsage(TOOL_ID, {
+          fileName: file.name,
+          width: stats.width,
+          height: stats.height,
+          total: stats.total,
+          modifiedCount: stats.modifiedCount,
+          transparentCount: stats.transparentCount,
+          opaqueCount: stats.opaqueCount,
+        });
+        if (ret.recorded) loadHistory();
+      } catch (err) {
+        messageApi.warning(`历史记录保存失败：${err.message}`);
+      }
     } catch (err) {
       messageApi.error(`处理失败：${err.message}`);
     } finally {
@@ -203,6 +252,9 @@ export default function PngAlphaNormalize() {
       ) : (
         uploadArea
       )}
+
+      <Divider />
+      <HistoryPanel records={historyRecords} loading={historyLoading} error={historyError} />
     </div>
   );
 }
@@ -288,4 +340,56 @@ function ResultView({ result, onReset, onDownload }) {
       </Space>
     </div>
   );
+}
+
+/** 历史记录面板：展示该工具在 Gitee 仓库中的使用记录 */
+function HistoryPanel({ records, loading, error }) {
+  return (
+    <div>
+      <Typography.Title level={5} style={{ marginTop: 0 }}>
+        <HistoryOutlined /> 历史记录
+        <Text type="secondary" style={{ fontSize: 12, fontWeight: 400, marginLeft: 8 }}>
+          自动保存至 Gitee 仓库，保留最近 20 次
+        </Text>
+      </Typography.Title>
+      {!isGiteeConfigured() ? (
+        <Alert
+          type="info"
+          showIcon
+          message="尚未配置 Gitee 仓库"
+          description="配置后，你的每次使用记录将自动保存到指定仓库（history/ 目录下按工具分文件夹，保留最近 20 次）。点击右上角「Gitee 配置」开启。"
+        />
+      ) : loading ? (
+        <div style={{ textAlign: 'center', padding: 24 }}>
+          <Spin />
+        </div>
+      ) : error ? (
+        <Alert type="error" showIcon message="历史记录加载失败" description={error} />
+      ) : records.length === 0 ? (
+        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无使用记录" />
+      ) : (
+        <List
+          size="small"
+          dataSource={records}
+          renderItem={(item) => (
+            <List.Item>
+              <List.Item.Meta
+                title={item.fileName}
+                description={`${formatTime(item.time)} ｜ ${item.width}×${item.height} ｜ 修改 ${(item.modifiedCount ?? 0).toLocaleString()} 像素`}
+              />
+            </List.Item>
+          )}
+        />
+      )}
+    </div>
+  );
+}
+
+/** ISO 时间字符串 → 本地时间文本 */
+function formatTime(iso) {
+  try {
+    return new Date(iso).toLocaleString('zh-CN', { hour12: false });
+  } catch {
+    return iso;
+  }
 }

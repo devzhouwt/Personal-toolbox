@@ -1,18 +1,25 @@
 import { Route, Routes } from 'react-router-dom';
-import { Layout, Menu, Typography, theme } from 'antd';
+import { useState } from 'react';
+import { Button, Layout, Menu, Tag, Tooltip, Typography, theme } from 'antd';
 import {
+  CloudServerOutlined,
   HomeOutlined,
+  SettingOutlined,
   ToolOutlined,
 } from '@ant-design/icons';
 import { useNavigate, useLocation } from 'react-router-dom';
 import tools from './tools';
 import Home from './pages/Home';
+import GiteeSettings from './components/GiteeSettings';
+import { isGiteeConfigured } from './services/history';
 
 const { Header, Sider, Content } = Layout;
 
 export default function App() {
   const navigate = useNavigate();
   const location = useLocation();
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [giteeReady, setGiteeReady] = useState(isGiteeConfigured());
   const {
     token: { colorBgContainer, borderRadiusLG },
   } = theme.useToken();
@@ -73,6 +80,7 @@ export default function App() {
             borderBottom: '1px solid #f0f0f0',
             display: 'flex',
             alignItems: 'center',
+            justifyContent: 'space-between',
           }}
         >
           <Typography.Title level={4} style={{ margin: 0 }}>
@@ -80,6 +88,25 @@ export default function App() {
               ? '首页'
               : tools.find((tool) => location.pathname.startsWith(tool.path))?.name ?? '个人工具箱'}
           </Typography.Title>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            {giteeReady ? (
+              <Tooltip title="工具使用历史将同步到该 Gitee 仓库">
+                <Tag icon={<CloudServerOutlined />} color="success">
+                  历史同步已开启
+                </Tag>
+              </Tooltip>
+            ) : (
+              <Tooltip title="配置 Gitee 仓库后，工具使用历史将自动保存">
+                <Tag icon={<CloudServerOutlined />}>未配置历史存储</Tag>
+              </Tooltip>
+            )}
+            <Button
+              icon={<SettingOutlined />}
+              onClick={() => setSettingsOpen(true)}
+            >
+              Gitee 配置
+            </Button>
+          </div>
         </Header>
         <Content
           style={{
@@ -98,6 +125,11 @@ export default function App() {
           </Routes>
         </Content>
       </Layout>
+      <GiteeSettings
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        onChanged={() => setGiteeReady(isGiteeConfigured())}
+      />
     </Layout>
   );
 }
