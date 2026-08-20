@@ -8,19 +8,23 @@ import {
   Divider,
   Empty,
   List,
+  Progress,
   Row,
   Space,
   Spin,
+  Tag,
   Typography,
   Upload,
   message,
 } from 'antd';
 import {
   DownloadOutlined,
+  FolderOpenOutlined,
   HistoryOutlined,
   InboxOutlined,
   ReloadOutlined,
 } from '@ant-design/icons';
+import JSZip from 'jszip';
 import {
   getToolHistory,
   isGiteeConfigured,
@@ -32,6 +36,9 @@ const { Paragraph, Text } = Typography;
 
 /** 工具存档目录名（对应 Gitee 仓库 history/ 下的子目录） */
 const TOOL_ID = 'png-alpha-normalize';
+
+/** 批量处理支持的图片格式 */
+const IMAGE_FILE_RE = /\.(png|jpe?g|webp|bmp|gif)$/i;
 
 /** 棋盘格背景，用于直观展示透明区域 */
 const CHECKER_BOARD = {
@@ -99,6 +106,7 @@ export default function PngAlphaNormalize() {
   const [historyRecords, setHistoryRecords] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState(null);
+  const [batchRunning, setBatchRunning] = useState(false);
 
   /** 从 Gitee 仓库加载本工具的历史记录（未配置或首次使用时不报错） */
   async function loadHistory() {
@@ -118,6 +126,16 @@ export default function PngAlphaNormalize() {
   useEffect(() => {
     loadHistory();
   }, []);
+
+  /** 保存使用历史到 Gitee 仓库（失败不阻断主流程） */
+  async function saveHistory(entry) {
+    try {
+      const ret = await recordToolUsage(TOOL_ID, entry);
+      if (ret.recorded) loadHistory();
+    } catch (err) {
+      messageApi.warning(`历史记录保存失败：${err.message}`);
+    }
+  }
 
   /** 处理上传的 PNG 文件 */
   async function handleFile(file) {
@@ -155,21 +173,16 @@ export default function PngAlphaNormalize() {
         stats,
       });
 
-      // 保存使用历史到 Gitee 仓库（失败不阻断主流程）
-      try {
-        const ret = await recordToolUsage(TOOL_ID, {
-          fileName: file.name,
-          width: stats.width,
-          height: stats.height,
-          total: stats.total,
-          modifiedCount: stats.modifiedCount,
-          transparentCount: stats.transparentCount,
-          opaqueCount: stats.opaqueCount,
-        });
-        if (ret.recorded) loadHistory();
-      } catch (err) {
-        messageApi.warning(`历史记录保存失败：${err.message}`);
-      }
+      // 保存使用历史到 Gitee 仓库
+      await saveHistory({
+        fileName: file.name,
+        width: stats.width,
+        height: stats.height,
+        total: stats.total,
+        modifiedCount: stats.modifiedCount,
+        transparentCount: stats.transparentCount,
+        opaqueCount: stats.opaqueCount,
+      });
     } catch (err) {
       messageApi.error(`处理失败：${err.message}`);
     } finally {
@@ -199,7 +212,7 @@ export default function PngAlphaNormalize() {
         accept=".png,image/png"
         showUploadList={false}
         beforeUpload={beforeUpload}
-        disabled={processing}
+        disabled={processing || batchRunning}
         style={{ padding: '8px 0' }}
       >
         <p className="ant-upload-drag-icon">
@@ -211,7 +224,7 @@ export default function PngAlphaNormalize() {
         </p>
       </Dragger>
     ),
-    [processing]
+    [processing, batchRunning]
   );
 
   return (
@@ -252,6 +265,18 @@ export default function PngAlphaNormalize() {
       ) : (
         uploadArea
       )}
+
+      <BatchProcessor
+        disabled={processing}
+        onRunningChange={setBatchRunning}
+        onBatchDone={(summary) =>
+          saveHistory({
+            fileName: `批量处理（${summary.done} 张图片）`,
+            batchCount: summary.done,
+            modifiedCount: summary.modified,
+          })
+        }
+      />
 
       <Divider />
       <HistoryPanel records={historyRecords} loading={historyLoading} error={historyError} />
@@ -375,7 +400,11 @@ function HistoryPanel({ records, loading, error }) {
             <List.Item>
               <List.Item.Meta
                 title={item.fileName}
-                description={`${formatTime(item.time)} ｜ ${item.width}×${item.height} ｜ 修改 ${(item.modifiedCount ?? 0).toLocaleString()} 像素`}
+                description={
+                  item.batchCount
+                    ? `${formatTime(item.time)} ｜ 批量处理 ${item.batchCount} 张图片`
+                    : `${formatTime(item.time)} ｜ ${item.width}×${item.height} ｜ 修改 ${(item.modifiedCount ?? 0).toLocaleString()} 像素`
+                }
               />
             </List.Item>
           )}
@@ -392,4 +421,205 @@ function formatTime(iso) {
   } catch {
     return iso;
   }
+}
+
+/**
+ * 批量处理器：选择文件夹，一次性处理目录（含子目录）下所有图片，打包 ZIP 下载。
+ * 每项状态：pending → processing → done / error，非图片文件标记 skipped。
+ */
+function BatchProcessor({ disabled, onRunningChange, onBatchDone }) {
+  const folderInputRef = useRef(null);
+  const [messageApi, contextHolder] = message.useMessage();
+  const [items, setItems] = useState([]); // { path, name, status, blob, zipPath, modifiedCount, error }
+  const [running, setRunning] = useState(false);
+  const [zipUrl, setZipUrl] = useState(null);
+
+  const doneCount = items.filter((i) => i.status === 'done').length;
+  const failedCount = items.filter((i) => i.status === 'error').length;
+  const skippedCount = items.filter((i) => i.status === 'skipped').length;
+  const total = items.length;
+  const finished = doneCount + failedCount + skippedCount;
+  const percent = total ? Math.round((finished / total) * 100) : 0;
+
+  /** 选择文件夹后开始批量处理 */
+  async function handleFolderChange(e) {
+    const files = Array.from(e.target.files || []);
+    e.target.value = ''; // 允许重复选择同一文件夹
+    if (!files.length) return;
+
+    const initItems = files.map((f) => {
+      const path = f.webkitRelativePath || f.name;
+      return {
+        path,
+        name: f.name,
+        zipPath: toZipPath(path),
+        status: IMAGE_FILE_RE.test(f.name) ? 'pending' : 'skipped',
+        blob: null,
+        modifiedCount: 0,
+        error: null,
+      };
+    });
+    setItems(initItems);
+    setZipUrl(null);
+    setRunning(true);
+    onRunningChange?.(true);
+
+    const skipped = initItems.filter((i) => i.status === 'skipped').length;
+    messageApi.info(`共选择 ${files.length} 个文件，其中图片 ${files.length - skipped} 个，开始处理…`);
+
+    let success = 0;
+    let modifiedTotal = 0;
+    const pendingIndexes = initItems
+      .map((item, idx) => ({ item, idx }))
+      .filter(({ item }) => item.status === 'pending');
+
+    for (const { idx } of pendingIndexes) {
+      const file = files[idx];
+      setItems((prev) => prev.map((p, i) => (i === idx ? { ...p, status: 'processing' } : p)));
+      try {
+        const url = URL.createObjectURL(file);
+        const img = new Image();
+        await new Promise((resolve, reject) => {
+          img.onload = resolve;
+          img.onerror = () => reject(new Error('图片加载失败'));
+          img.src = url;
+        });
+        const { blob, stats } = await normalizeAlpha(img);
+        URL.revokeObjectURL(url);
+        success += 1;
+        modifiedTotal += stats.modifiedCount;
+        setItems((prev) =>
+          prev.map((p, i) =>
+            i === idx ? { ...p, status: 'done', blob, modifiedCount: stats.modifiedCount } : p
+          )
+        );
+      } catch (err) {
+        setItems((prev) =>
+          prev.map((p, i) => (i === idx ? { ...p, status: 'error', error: err.message } : p))
+        );
+      }
+    }
+
+    setRunning(false);
+    onRunningChange?.(false);
+    if (success > 0) {
+      messageApi.success(`批量处理完成：成功 ${success} 个`);
+      onBatchDone?.({ done: success, modified: modifiedTotal });
+    } else {
+      messageApi.warning('没有图片处理成功，请检查所选文件夹');
+    }
+  }
+
+  /** 打包所有成功结果并触发下载 */
+  async function handleDownloadZip() {
+    const doneItems = items.filter((i) => i.status === 'done');
+    if (!doneItems.length) return;
+    if (!zipUrl) {
+      const zip = new JSZip();
+      doneItems.forEach((item) => zip.file(item.zipPath, item.blob));
+      const blob = await zip.generateAsync({ type: 'blob' });
+      setZipUrl(URL.createObjectURL(blob));
+    }
+    triggerDownload(zipUrl, 'processed_images.zip');
+  }
+
+  function triggerDownload(url, name) {
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = name;
+    link.click();
+  }
+
+  return (
+    <div style={{ marginTop: 16 }}>
+      {contextHolder}
+      <input
+        ref={folderInputRef}
+        type="file"
+        multiple
+        directory=""
+        webkitdirectory=""
+        style={{ display: 'none' }}
+        onChange={handleFolderChange}
+      />
+      <Space direction="vertical" style={{ width: '100%' }}>
+        <Button
+          icon={<FolderOpenOutlined />}
+          disabled={disabled || running}
+          onClick={() => folderInputRef.current?.click()}
+          block
+        >
+          选择文件夹批量处理
+        </Button>
+        <Text type="secondary" style={{ fontSize: 12, textAlign: 'center', display: 'block' }}>
+          支持 png / jpg / jpeg / webp / bmp / gif，自动处理所选文件夹（含子目录）内的全部图片，结果打包为 ZIP 一键下载
+        </Text>
+        {items.length > 0 && (
+          <Card size="small" styles={{ body: { padding: 12 } }}>
+            <Progress percent={percent} status={running ? 'active' : finished === total ? 'success' : 'active'} />
+            <List
+              size="small"
+              style={{ maxHeight: 300, overflowY: 'auto' }}
+              dataSource={items}
+              renderItem={(item) => (
+                <List.Item
+                  actions={[
+                    item.status === 'pending' ? (
+                      <Tag key="s">等待中</Tag>
+                    ) : item.status === 'processing' ? (
+                      <Tag key="s" color="processing">
+                        处理中
+                      </Tag>
+                    ) : item.status === 'done' ? (
+                      <Tag key="s" color="success">
+                        完成
+                      </Tag>
+                    ) : item.status === 'skipped' ? (
+                      <Tag key="s">已跳过</Tag>
+                    ) : (
+                      <Tag key="s" color="error">
+                        失败
+                      </Tag>
+                    ),
+                  ]}
+                >
+                  <List.Item.Meta
+                    title={item.path}
+                    description={
+                      item.status === 'error'
+                        ? item.error
+                        : item.status === 'done'
+                          ? `修改 ${item.modifiedCount.toLocaleString()} 像素`
+                          : item.status === 'skipped'
+                            ? '非图片文件'
+                            : undefined
+                    }
+                  />
+                </List.Item>
+              )}
+            />
+            {!running && doneCount > 0 && (
+              <Button
+                type="primary"
+                icon={<DownloadOutlined />}
+                onClick={handleDownloadZip}
+                style={{ marginTop: 8 }}
+              >
+                下载全部（ZIP，{doneCount} 个文件）
+              </Button>
+            )}
+          </Card>
+        )}
+      </Space>
+    </div>
+  );
+}
+
+/** 输出路径：保留相对目录，文件名追加 _normalized.png */
+function toZipPath(path) {
+  const parts = path.split('/');
+  const fileName = parts.pop();
+  const dot = fileName.lastIndexOf('.');
+  const base = dot > 0 ? fileName.slice(0, dot) : fileName;
+  return [...parts, `${base}_normalized.png`].join('/');
 }

@@ -118,7 +118,9 @@ function utf8ToBase64(str) {
 
 /** Base64 → UTF-8 字符串 */
 function base64ToUtf8(base64) {
-  const binary = atob(base64);
+  // Gitee API 返回的 content 可能包含换行符（RFC 2045 格式），atob 要求严格 base64，需先去除空白
+  const cleaned = base64.replace(/\s/g, '');
+  const binary = atob(cleaned);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return new TextDecoder().decode(bytes);
