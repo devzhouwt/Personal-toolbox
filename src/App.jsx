@@ -25,6 +25,9 @@ export default function App() {
   const [giteeReady, setGiteeReady] = useState(isGiteeConfigured());
   // 左侧导航默认隐藏：点击页头按钮展开，进入具体功能页后自动收起
   const [navOpen, setNavOpen] = useState(false);
+  // 菜单展开的子分组（默认展开"全部工具"）；折叠态下强制为空：
+  // 否则子菜单在 vertical 模式下被判定为展开，首屏会在左上角默认弹出悬浮卡片
+  const [menuOpenKeys, setMenuOpenKeys] = useState(['tools-group']);
   const {
     token: { colorBgContainer, borderRadiusLG },
   } = theme.useToken();
@@ -94,7 +97,9 @@ export default function App() {
         <Menu
           mode="inline"
           selectedKeys={selectedKey ? [selectedKey] : []}
-          defaultOpenKeys={['tools-group']}
+          // 导航收起时不保留展开的子菜单，避免首屏左上角弹出悬浮卡片
+          openKeys={navOpen ? menuOpenKeys : []}
+          onOpenChange={setMenuOpenKeys}
           items={menuItems}
           onClick={({ key }) => {
             navigate(key);
