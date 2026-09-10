@@ -15,6 +15,9 @@ const MAX_RECORDS = 20;
 const HISTORY_DIR = 'history';
 const FILE_NAME = 'history.json';
 
+/** 每种工具保留的历史记录条数上限（供调用方清理旧存档时同步使用） */
+export const HISTORY_RECORD_LIMIT = MAX_RECORDS;
+
 /** 由工具注册路径推导存档目录名，如 /tools/png-alpha-normalize → png-alpha-normalize */
 export function toolIdFromPath(path) {
   return path.split('/').filter(Boolean).pop();

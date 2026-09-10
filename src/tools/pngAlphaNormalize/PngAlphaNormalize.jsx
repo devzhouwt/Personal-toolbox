@@ -29,13 +29,29 @@ import {
   getToolHistory,
   isGiteeConfigured,
   recordToolUsage,
+  HISTORY_RECORD_LIMIT,
 } from '../../services/history';
+import {
+  deleteRepoFile,
+  getGiteeConfig,
+  readRepoFileBinary,
+  writeRepoFile,
+} from '../../services/gitee';
 
 const { Dragger } = Upload;
 const { Paragraph, Text } = Typography;
 
 /** 工具存档目录名（对应 Gitee 仓库 history/ 下的子目录） */
 const TOOL_ID = 'png-alpha-normalize';
+
+/** 云端单文件上限内（约 1MB，留余量）的结果图才会随记录存档 */
+const MAX_RESULT_IMAGE_BYTES = 900 * 1024;
+
+/** 处理结果图在仓库中的独立目录 */
+const RESULTS_DIR = `history/${TOOL_ID}/results`;
+
+/** 历史写入串行队列（模块级）：连续处理时避免 history.json 读-改-写互相覆盖 */
+let historyWriteChain = Promise.resolve();
 
 /** 批量处理支持的图片格式 */
 const IMAGE_FILE_RE = /\.(png|jpe?g|webp|bmp|gif)$/i;
@@ -106,6 +122,7 @@ export default function PngAlphaNormalize() {
   const [historyRecords, setHistoryRecords] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState(null);
+  const [downloadingPath, setDownloadingPath] = useState(null); // 正在下载结果图的云端路径
   const [batchRunning, setBatchRunning] = useState(false);
 
   /** 从 Gitee 仓库加载本工具的历史记录（未配置或首次使用时不报错） */
@@ -127,13 +144,89 @@ export default function PngAlphaNormalize() {
     loadHistory();
   }, []);
 
-  /** 保存使用历史到 Gitee 仓库（失败不阻断主流程） */
-  async function saveHistory(entry) {
+  /**
+   * 保存一次使用记录（串行队列，防止连续处理互相覆盖 history.json）。
+   * 单张处理的结果图（不超过云端单文件上限）同步上传到 Gitee 独立目录；
+   * 云端记录达到 20 条上限时，被挤出的最旧记录若带结果图会一并清理仓库文件。
+   */
+  function saveHistory(entry, imageBlob) {
+    const config = getGiteeConfig();
+    if (!config) return Promise.resolve();
+    historyWriteChain = historyWriteChain.then(async () => {
+      // 先读当前云端记录：用于判断本次写入后是否有旧记录（及其结果图）被挤出
+      let before = null;
+      try {
+        before = await getToolHistory(TOOL_ID);
+      } catch {
+        before = null;
+      }
+
+      let resultImage = null;
+      let imageNote = null;
+      if (imageBlob) {
+        if (imageBlob.size > MAX_RESULT_IMAGE_BYTES) {
+          imageNote = `结果图 ${(imageBlob.size / 1024).toFixed(0)} KB 超过云端单文件上限（${MAX_RESULT_IMAGE_BYTES / 1024} KB），仅保存了记录`;
+        } else {
+          try {
+            const bytes = new Uint8Array(await imageBlob.arrayBuffer());
+            const fileName = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.png`;
+            const path = `${RESULTS_DIR}/${fileName}`;
+            await writeRepoFile(config.owner, config.repo, config.token, path, bytes, config.branch, '保存 PNG 归一化结果图');
+            resultImage = { path, size: imageBlob.size };
+          } catch (err) {
+            imageNote = `结果图上传失败：${err.message}，仅保存了记录`;
+          }
+        }
+      }
+
+      const ret = await recordToolUsage(TOOL_ID, { ...entry, resultImage, imageNote });
+      if (ret.recorded) {
+        if (before?.records?.length >= HISTORY_RECORD_LIMIT) {
+          const droppedPath = before.records[before.records.length - 1]?.resultImage?.path;
+          if (droppedPath) {
+            try {
+              await deleteRepoFile(config.owner, config.repo, config.token, droppedPath, config.branch, '清理超出 20 条上限的旧处理结果图');
+            } catch {
+              // 清理失败仅残留仓库文件，不影响后续记录
+            }
+          }
+        }
+        loadHistory();
+      }
+    });
+    // 链上补错：提示用户并恢复链条，不阻断后续写入
+    historyWriteChain = historyWriteChain.then(
+      () => undefined,
+      (err) => {
+        messageApi.warning(`历史记录保存失败：${err.message}`);
+      }
+    );
+    return historyWriteChain;
+  }
+
+  /** 从 Gitee 仓库读取某条历史记录对应的处理结果图并触发下载 */
+  async function handleDownloadResult(record) {
+    const config = getGiteeConfig();
+    const path = record?.resultImage?.path;
+    if (!config || !path) return;
+    setDownloadingPath(path);
     try {
-      const ret = await recordToolUsage(TOOL_ID, entry);
-      if (ret.recorded) loadHistory();
+      const file = await readRepoFileBinary(config.owner, config.repo, config.token, path, config.branch);
+      if (!file) {
+        messageApi.warning('云端结果图不存在（可能已被清理），仅剩文字记录');
+        return;
+      }
+      const blob = new Blob([file.bytes], { type: 'image/png' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = record.resultName ?? `${record.fileName ?? 'result'}_normalized.png`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (err) {
-      messageApi.warning(`历史记录保存失败：${err.message}`);
+      messageApi.error(`结果图下载失败：${err.message}`);
+    } finally {
+      setDownloadingPath(null);
     }
   }
 
@@ -173,16 +266,20 @@ export default function PngAlphaNormalize() {
         stats,
       });
 
-      // 保存使用历史到 Gitee 仓库
-      await saveHistory({
-        fileName: file.name,
-        width: stats.width,
-        height: stats.height,
-        total: stats.total,
-        modifiedCount: stats.modifiedCount,
-        transparentCount: stats.transparentCount,
-        opaqueCount: stats.opaqueCount,
-      });
+      // 后台保存使用记录与结果图（串行队列），不阻塞结果展示
+      saveHistory(
+        {
+          fileName: file.name,
+          resultName: `${baseName}_normalized.png`,
+          width: stats.width,
+          height: stats.height,
+          total: stats.total,
+          modifiedCount: stats.modifiedCount,
+          transparentCount: stats.transparentCount,
+          opaqueCount: stats.opaqueCount,
+        },
+        blob
+      );
     } catch (err) {
       messageApi.error(`处理失败：${err.message}`);
     } finally {
@@ -220,7 +317,7 @@ export default function PngAlphaNormalize() {
         </p>
         <p className="ant-upload-text">点击或拖拽 PNG 图片到此处上传</p>
         <p className="ant-upload-hint">
-          支持单张图片，处理过程完全在本地浏览器中进行，图片不会上传到服务器
+          支持单张图片。处理在本地浏览器中进行；配置了 Gitee 仓库后，结果图与使用记录会自动同步到你的仓库（保留最近 20 次，可随时重新下载）
         </p>
       </Dragger>
     ),
@@ -279,7 +376,13 @@ export default function PngAlphaNormalize() {
       />
 
       <Divider />
-      <HistoryPanel records={historyRecords} loading={historyLoading} error={historyError} />
+      <HistoryPanel
+        records={historyRecords}
+        loading={historyLoading}
+        error={historyError}
+        downloadingPath={downloadingPath}
+        onDownload={handleDownloadResult}
+      />
     </div>
   );
 }
@@ -352,7 +455,7 @@ function ResultView({ result, onReset, onDownload }) {
         ]}
       />
 
-      <Space style={{ marginTop: 16 }}>
+      <Space style={{ marginTop: 16 }} wrap>
         <Button type="primary" icon={<DownloadOutlined />} onClick={onDownload}>
           下载处理结果
         </Button>
@@ -367,14 +470,14 @@ function ResultView({ result, onReset, onDownload }) {
   );
 }
 
-/** 历史记录面板：展示该工具在 Gitee 仓库中的使用记录 */
-function HistoryPanel({ records, loading, error }) {
+/** 历史记录面板：展示该工具在 Gitee 仓库中的使用记录，单张处理结果图可重新下载 */
+function HistoryPanel({ records, loading, error, downloadingPath, onDownload }) {
   return (
     <div>
       <Typography.Title level={5} style={{ marginTop: 0 }}>
         <HistoryOutlined /> 历史记录
         <Text type="secondary" style={{ fontSize: 12, fontWeight: 400, marginLeft: 8 }}>
-          自动保存至 Gitee 仓库，保留最近 20 次
+          自动保存至 Gitee 仓库，保留最近 20 次；单张处理结果图可重新下载
         </Text>
       </Typography.Title>
       {!isGiteeConfigured() ? (
@@ -382,7 +485,7 @@ function HistoryPanel({ records, loading, error }) {
           type="info"
           showIcon
           message="尚未配置 Gitee 仓库"
-          description="配置后，你的每次使用记录将自动保存到指定仓库（history/ 目录下按工具分文件夹，保留最近 20 次）。点击右上角「Gitee 配置」开启。"
+          description="配置后，每次单张处理的结果图与使用记录会自动保存到你的 Gitee 仓库（history/png-alpha-normalize/ 下按文件存放，保留最近 20 次），在历史记录中可随时重新下载结果图。点击右上角「Gitee 配置」开启。"
         />
       ) : loading ? (
         <div style={{ textAlign: 'center', padding: 24 }}>
@@ -397,13 +500,39 @@ function HistoryPanel({ records, loading, error }) {
           size="small"
           dataSource={records}
           renderItem={(item) => (
-            <List.Item>
+            <List.Item
+              actions={
+                item.resultImage
+                  ? [
+                      <Button
+                        key="download"
+                        type="link"
+                        size="small"
+                        icon={<DownloadOutlined />}
+                        loading={downloadingPath === item.resultImage.path}
+                        onClick={() => onDownload(item)}
+                      >
+                        下载结果图
+                      </Button>,
+                    ]
+                  : undefined
+              }
+            >
               <List.Item.Meta
                 title={item.fileName}
                 description={
-                  item.batchCount
-                    ? `${formatTime(item.time)} ｜ 批量处理 ${item.batchCount} 张图片`
-                    : `${formatTime(item.time)} ｜ ${item.width}×${item.height} ｜ 修改 ${(item.modifiedCount ?? 0).toLocaleString()} 像素`
+                  <>
+                    <div>
+                      {item.batchCount
+                        ? `${formatTime(item.time)} ｜ 批量处理 ${item.batchCount} 张图片`
+                        : `${formatTime(item.time)} ｜ ${item.width}×${item.height} ｜ 修改 ${(item.modifiedCount ?? 0).toLocaleString()} 像素`}
+                    </div>
+                    {item.imageNote && (
+                      <Text type="warning" style={{ fontSize: 12 }}>
+                        {item.imageNote}
+                      </Text>
+                    )}
+                  </>
                 }
               />
             </List.Item>

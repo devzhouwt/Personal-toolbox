@@ -4,6 +4,9 @@ node_modules/
 # 构建产物
 dist/
 
+# PWA 开发模式临时产物（dev 下生成的 Service Worker）
+dev-dist/
+
 # 本地测试图片与验证截图
 scripts/*.png
 

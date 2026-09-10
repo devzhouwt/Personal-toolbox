@@ -23,7 +23,8 @@ import {
 
 /**
  * Gitee 仓库配置弹窗：仓库所有者 / 仓库名 / 私人令牌。
- * 配置保存在浏览器 localStorage 中，用于将工具使用历史存入指定仓库。
+ * 配置保存在浏览器 localStorage 中，用于将工具使用历史与存档存入指定仓库。
+ * 保存时自动验证仓库与令牌，并将仓库默认分支（master/main）写入配置，存档读写均使用该分支。
  */
 export default function GiteeSettings({ open, onClose, onChanged }) {
   const [form] = Form.useForm();
@@ -73,22 +74,33 @@ export default function GiteeSettings({ open, onClose, onChanged }) {
     }
   }
 
-  /** 保存配置到 localStorage */
-  function handleSave() {
+  /** 保存配置：先自动验证仓库与令牌（成功时回填默认分支），通过后才写入本地 */
+  async function handleSave() {
     const { owner, repo, token } = getFormValues();
     if (!owner || !repo || !token) {
       messageApi.warning('请先填写完整的仓库信息');
       return;
     }
-    saveGiteeConfig({
-      owner: owner.trim(),
-      repo: repo.trim(),
-      token: token.trim(),
-      branch: testResult?.defaultBranch ?? getGiteeConfig()?.branch ?? 'master',
-    });
-    messageApi.success('配置已保存');
-    onChanged?.();
-    onClose();
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const info = await getRepoInfo(owner.trim(), repo.trim(), token.trim());
+      setTestResult({ fullName: info.fullName, defaultBranch: info.defaultBranch });
+      saveGiteeConfig({
+        owner: owner.trim(),
+        repo: repo.trim(),
+        token: token.trim(),
+        branch: info.defaultBranch,
+      });
+      messageApi.success(`配置已保存（默认分支 ${info.defaultBranch}）`);
+      onChanged?.();
+      onClose();
+    } catch (err) {
+      setTestResult({ error: err.message });
+      messageApi.error(`保存失败：${err.message}`);
+    } finally {
+      setTesting(false);
+    }
   }
 
   /** 清除本地配置 */
@@ -109,7 +121,7 @@ export default function GiteeSettings({ open, onClose, onChanged }) {
         open={open}
         onCancel={onClose}
         footer={
-          <Space>
+          <Space wrap style={{ width: '100%', justifyContent: 'flex-end' }}>
             <Button danger icon={<DeleteOutlined />} onClick={handleClear}>
               清除配置
             </Button>
@@ -127,7 +139,7 @@ export default function GiteeSettings({ open, onClose, onChanged }) {
           showIcon
           style={{ marginBottom: 16 }}
           message="配置说明"
-          description="工具使用历史将存储在你指定的 Gitee 仓库中（history/ 目录下按工具分文件夹）。令牌仅保存在本浏览器 localStorage 中，生成令牌时请勾选 projects 权限。"
+          description="保存时会自动验证仓库与令牌。存档与使用记录将存于仓库中（history/ 目录下按工具分文件夹），读写均使用仓库默认分支。令牌仅保存在本浏览器 localStorage 中，生成令牌时请勾选 projects 权限。"
         />
         <Form form={form} layout="vertical" style={{ marginTop: 4 }}>
           <Form.Item label="仓库所有者" name="owner" required tooltip="Gitee 用户名或组织名">
