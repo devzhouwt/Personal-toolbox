@@ -106,7 +106,6 @@ export default function CycleTracker() {
       if (!isGiteeConfigured()) {
         // 本地模式
         syncedSnapshotRef.current = snapshot(local.calendars);
-        initializedRef.current = true;
         setCalendars(local.calendars);
         setSyncState('local');
         setLoading(false);
@@ -149,7 +148,6 @@ export default function CycleTracker() {
         );
       } finally {
         if (!cancelled) {
-          initializedRef.current = true;
           setLoading(false);
         }
       }
@@ -163,9 +161,15 @@ export default function CycleTracker() {
 
   /** 数据变更后的持久化：先写本地缓存，再串行推送 Gitee */
   useEffect(() => {
-    if (!initializedRef.current) return;
     const snap = snapshot(calendars);
-    if (snap === syncedSnapshotRef.current) return; // 初始化加载或已同步，无实质变化
+    if (snap === syncedSnapshotRef.current) {
+      // 状态已与存档基线一致（初始化加载完成或已同步）：正式进入变更跟踪
+      initializedRef.current = true;
+      return;
+    }
+    // 初始化尚未完成时忽略本轮的旧状态（初始化注入新状态的同轮 commit 中，
+    // 持久化副作用仍会读到旧值，直接写入会覆盖本地缓存）
+    if (!initializedRef.current) return;
 
     saveData({ calendars }); // 本地缓存始终即时更新
     if (!isGiteeConfigured() || cloudUnavailableRef.current) {

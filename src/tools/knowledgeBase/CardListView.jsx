@@ -31,7 +31,7 @@ import {
   UploadOutlined,
   WarningOutlined,
 } from '@ant-design/icons';
-import { coldCards, daysSince, fmtAgo, fmtDateTime, recentSections, searchCards } from './kbCore';
+import { coldCards, daysSince, fmtAgo, fmtDateTime, highlightSegments, recentSections, searchCards } from './kbCore';
 import CardEditModal from './CardEditModal';
 
 const { Paragraph, Text } = Typography;
@@ -72,6 +72,31 @@ function downloadText(fileName, text) {
   a.download = fileName;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/** 列表卡片内容预览最多展示的字数（超出以省略号省略，完整内容点击卡片进入详情查看） */
+const CONTENT_PREVIEW_MAX = 50;
+
+/** 生成卡片内容预览：最多前 50 个字，超出部分省略；按 Unicode 字符切分，避免截断 emoji 等代理对 */
+function contentPreview(content) {
+  const chars = Array.from(content);
+  if (chars.length <= CONTENT_PREVIEW_MAX) return content;
+  return `${chars.slice(0, CONTENT_PREVIEW_MAX).join('')}…`;
+}
+
+/** 将文本渲染为含高亮片段的节点：无关键词或未命中时返回原文（仅用于卡片内容预览，与详情页同款黄色高亮） */
+function renderHighlighted(text, tokens) {
+  const parts = highlightSegments(text, tokens);
+  if (!parts) return text;
+  return parts.map((p, i) =>
+    p.mark ? (
+      <Text key={i} mark>
+        {p.text}
+      </Text>
+    ) : (
+      p.text
+    )
+  );
 }
 
 /**
@@ -136,20 +161,24 @@ export default function CardListView({
   const sections = useMemo(() => recentSections(scopeEntries), [scopeEntries]);
   const coldList = useMemo(() => coldCards(scopeEntries), [scopeEntries]);
 
-  /** 知识卡片磁贴（点击进入详情） */
+  /** 知识卡片磁贴（点击进入详情；搜索模式下内容预览的命中关键词高亮，并携带关键词供详情页高亮；标题与标签不参与检索故不高亮） */
   function CardTile({ card, footerLeft, footerRight }) {
+    // 搜索模式下的关键词：用于内容预览高亮与详情页跳转（非搜索模式为 null，按原文展示）
+    const tokens = searching ? searchResult?.tokens : null;
     return (
       <Card
         size="small"
         hoverable
         style={{ height: '100%' }}
         styles={{ body: { padding: 12 } }}
-        onClick={() => onOpenCard(card.id)}
+        onClick={() => onOpenCard(card.id, tokens)}
       >
-        <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-          <Text strong>{card.title}</Text>
-        </div>
-        <div style={{ marginTop: 6 }}>
+        {card.title ? (
+          <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            <Text strong>{card.title}</Text>
+          </div>
+        ) : null}
+        <div style={{ marginTop: card.title ? 6 : 0 }}>
           {card.tags.map((t) => (
             <Tag key={t} style={{ marginBottom: 4 }}>
               {t}
@@ -157,12 +186,8 @@ export default function CardListView({
           ))}
         </div>
         {card.content ? (
-          <Paragraph
-            type="secondary"
-            ellipsis={{ rows: 2, tooltip: card.content }}
-            style={{ margin: '4px 0 8px' }}
-          >
-            {card.content}
+          <Paragraph type="secondary" style={{ margin: '4px 0 8px', wordBreak: 'break-word' }}>
+            {renderHighlighted(contentPreview(card.content), tokens)}
           </Paragraph>
         ) : null}
         <div
@@ -194,7 +219,7 @@ export default function CardListView({
         grid={{ gutter: 16, xs: 1, sm: 2, md: 2, lg: 3, xl: 4 }}
         dataSource={cards}
         rowKey="id"
-        pagination={{ pageSize: 12, size: 'small', hideOnSinglePage: true }}
+        pagination={{ pageSize: 50, size: 'small', hideOnSinglePage: true }}
         renderItem={(card) => (
           <List.Item style={{ height: '100%' }}>
             <CardTile card={card} footerLeft={footerFor?.left?.(card)} footerRight={footerFor?.right?.(card)} />

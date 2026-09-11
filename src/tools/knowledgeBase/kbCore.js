@@ -10,13 +10,14 @@
  *   ],
  * }
  *
- * 知识卡片字段（见 PRD 2.1）：id / title / tags / content / createdAt / updatedAt / lastViewedAt?
+ * 知识卡片字段（见 PRD 2.1）：id / title（可为空，为空时界面不显示标题）/ tags / content /
+ * createdAt / updatedAt / lastViewedAt?
  */
 
 const DEFAULT_NAME = '未分类';
 
-/** 卡片标题的兜底展示名（新增/编辑时标题留空，或数据修复时标题为空均使用） */
-export const DEFAULT_CARD_TITLE = '未命名知识';
+/** 旧版标题兜底名：历史数据在标题留空时由系统写入该占位名，读取修复时按空标题迁移（不再展示） */
+const LEGACY_FALLBACK_TITLE = '未命名知识';
 
 /** 允许出现在分类名 / 标签中的控制字符之外的字符范围校验 */
 const INVALID_NAME_RE = /[\\/:*?"<>|\u0000-\u001f\u007f]/g;
@@ -220,7 +221,9 @@ export function repairState(raw) {
 
 /** 修复单张卡片：字段缺失补齐、类型纠正；category 字段忽略（由所在分类推导） */
 function normalizeCard(rawCard, id, nowIso) {
-  const title = String(rawCard.title ?? '').trim() || DEFAULT_CARD_TITLE;
+  const rawTitle = String(rawCard.title ?? '').trim();
+  // 旧兜底名「未命名知识」转为空标题（留空即不显示标题），避免历史数据继续展示系统占位名
+  const title = rawTitle === LEGACY_FALLBACK_TITLE ? '' : rawTitle;
   const createdAt = isValidIso(rawCard.createdAt) ? rawCard.createdAt : nowIso;
   const updatedAt = isValidIso(rawCard.updatedAt) ? rawCard.updatedAt : createdAt;
   const card = {
@@ -309,6 +312,52 @@ export function searchCards(entries, keyword) {
   return { matched, tokens };
 }
 
+/**
+ * 搜索高亮切分（详情页用）：按关键词在内容中的命中区间切分为文本片段。
+ * 匹配规则与搜索一致（忽略大小写的内容包含匹配）；重叠或相接的命中区间合并，
+ * 片段 text 保留原文大小写，mark 标记是否需要高亮展示。
+ * @param {string} content 卡片内容原文
+ * @param {string[]} [tokens] 搜索关键词（tokenizeKeyword 结果）
+ * @returns {Array<{ text: string, mark: boolean }>|null} 无关键词或无命中时返回 null（按原文展示）
+ */
+export function highlightSegments(content, tokens) {
+  const text = String(content ?? '');
+  const list = (Array.isArray(tokens) ? tokens : [])
+    .map((t) => String(t ?? '').toLowerCase())
+    .filter(Boolean);
+  if (!text || list.length === 0) return null;
+  const lower = text.toLowerCase();
+  const ranges = [];
+  for (const token of list) {
+    let idx = lower.indexOf(token);
+    while (idx !== -1) {
+      ranges.push([idx, idx + token.length]);
+      idx = lower.indexOf(token, idx + token.length);
+    }
+  }
+  if (ranges.length === 0) return null;
+  ranges.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  // 合并重叠/相接区间（多关键词互相包含或紧邻时避免重复高亮）
+  const merged = [];
+  for (const [start, end] of ranges) {
+    const last = merged[merged.length - 1];
+    if (last && start <= last[1]) {
+      last[1] = Math.max(last[1], end);
+    } else {
+      merged.push([start, end]);
+    }
+  }
+  const parts = [];
+  let cursor = 0;
+  for (const [start, end] of merged) {
+    if (start > cursor) parts.push({ text: text.slice(cursor, start), mark: false });
+    parts.push({ text: text.slice(start, end), mark: true });
+    cursor = end;
+  }
+  if (cursor < text.length) parts.push({ text: text.slice(cursor), mark: false });
+  return parts;
+}
+
 /** 比较两条目的同一时间字段：返回正数表示 later 更大（用于倒序） */
 function compareTime(later, earlier, field) {
   const l = isValidIso(later[field]) ? Date.parse(later[field]) : 0;
@@ -329,7 +378,7 @@ function latestBy(entries, field, limit) {
  * 查看仅指进入详情页（列表展示不更新 lastViewedAt，由入口组件保证）。
  * @returns {{ adds: Array, updates: Array, views: Array }}
  */
-export function recentSections(entries, limit = 10) {
+export function recentSections(entries, limit = 50) {
   return {
     adds: latestBy(entries, 'createdAt', limit),
     updates: latestBy(entries, 'updatedAt', limit),

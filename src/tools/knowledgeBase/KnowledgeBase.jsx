@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Modal, Spin, Typography, message } from 'antd';
 import { isGiteeConfigured, recordToolUsage } from '../../services/history';
 import {
-  DEFAULT_CARD_TITLE,
   genCardId,
   genId,
   makeEmptyState,
@@ -62,11 +61,16 @@ export default function KnowledgeBase() {
   // 存档同步状态：local | ok | syncing | writeError | error（error = 云端不可用已降级）
   const [syncState, setSyncState] = useState('local');
   const [activeCardId, setActiveCardId] = useState(null);
+  // 进入详情时携带的搜索关键词（从搜索结果点击进入时设置），详情页用于高亮命中位置
+  const [detailHighlight, setDetailHighlight] = useState(null);
   // 云端文件损坏/缺失提示（进入工具时探测到）
   const [warnings, setWarnings] = useState([]);
 
   // 初始化（拉取存档）完成前不触发自动持久化
   const initializedRef = useRef(false);
+  // 初始化将要注入的状态引用：持久化副作用在该引用生效后才开始跟踪变更，
+  // 避免初始化同轮 commit 中用初始空库覆盖本地缓存
+  const syncedStateRef = useRef(null);
   // 最近一次与云端一致的各文件内容（fileName → 原文），作为文件级 diff 基线
   const refFilesRef = useRef({});
   // 最近一次推送成功时的内容键；键相同则仅本地增强（如最近查看）变化，无需推送
@@ -123,6 +127,7 @@ export default function KnowledgeBase() {
     };
     refFilesRef.current = readResult.rawFiles;
     contentKeyRef.current = contentKey(merged);
+    syncedStateRef.current = merged;
     setState(merged);
     saveLocal(merged);
   }
@@ -190,9 +195,9 @@ export default function KnowledgeBase() {
     const files = buildFiles(target);
     setSyncState('syncing');
     await enqueuePush(files, [], contentKey(target));
+    syncedStateRef.current = target;
     setState(target);
     saveLocal(target);
-    initializedRef.current = true;
     cloudUnavailableRef.current = false;
     setWarnings([]);
     setSyncState('ok');
@@ -209,7 +214,7 @@ export default function KnowledgeBase() {
       // 本地模式
       contentKeyRef.current = contentKey(local.state);
       refFilesRef.current = {};
-      initializedRef.current = true;
+      syncedStateRef.current = local.state;
       setState(local.state);
       setSyncState('local');
       setLoading(false);
@@ -257,7 +262,6 @@ export default function KnowledgeBase() {
       } else {
         // 云端正常：以远程为准（合并本地最近查看时间），提示损坏/缺失文件
         applyRemoteState(read, local.state);
-        initializedRef.current = true;
         cloudUnavailableRef.current = false;
         setSyncState('ok');
         if (read.warnings.length) {
@@ -274,6 +278,7 @@ export default function KnowledgeBase() {
       cloudUnavailableRef.current = true;
       contentKeyRef.current = contentKey(local.state);
       refFilesRef.current = {};
+      syncedStateRef.current = local.state;
       setState(local.state);
       setWarnings([]);
       setSyncState('error');
@@ -282,7 +287,6 @@ export default function KnowledgeBase() {
           '可点击列表页「同步到 Gitee」重试，或检查右上角「Gitee 配置」后重新进入本工具恢复云端同步。'
       );
     } finally {
-      initializedRef.current = true;
       setLoading(false);
     }
   }
@@ -295,7 +299,11 @@ export default function KnowledgeBase() {
 
   /** 内容变更后的持久化：先写本地缓存；云端可用且内容键变化时做文件 diff 推送 */
   useEffect(() => {
-    if (!initializedRef.current) return;
+    if (state === syncedStateRef.current) {
+      // 初始化注入的状态已生效：正式开始变更跟踪
+      initializedRef.current = true;
+    }
+    if (!initializedRef.current) return; // 初始化未完成：忽略初始空库状态，避免覆盖本地缓存
     saveLocal(state); // 本地缓存始终即时更新（含仅查看等本地增强变化）
     if (!isGiteeConfigured() || cloudUnavailableRef.current) return;
     const key = contentKey(state);
@@ -330,8 +338,11 @@ export default function KnowledgeBase() {
     enqueuePush(files, removed, contentKey(state));
   }
 
-  /** 处理查看卡片：进入详情时更新 lastViewedAt（仅本地，随下次编辑推送云端） */
-  function handleOpenCard(cardId) {
+  /**
+   * 处理查看卡片：进入详情时更新 lastViewedAt（仅本地，随下次编辑推送云端）。
+   * highlightTokens 为当前搜索关键词（从搜索结果点击进入），详情页用于内容高亮定位；非搜索进入为 null。
+   */
+  function handleOpenCard(cardId, highlightTokens) {
     const nowIso = new Date().toISOString();
     setState((prev) => ({
       ...prev,
@@ -341,12 +352,15 @@ export default function KnowledgeBase() {
       })),
     }));
     setActiveCardId(cardId);
+    setDetailHighlight(
+      Array.isArray(highlightTokens) && highlightTokens.length > 0 ? highlightTokens : null
+    );
   }
 
-  /** 新增知识卡片（values: { title, tags, categoryName, content }）；标题可为空，空值兜底为「未命名知识」 */
+  /** 新增知识卡片（values: { title, tags, categoryName, content }）；标题可为空，留空时保存为空字符串（不显示标题） */
   function handleCreate(values) {
     const nowIso = new Date().toISOString();
-    const title = String(values.title ?? '').trim() || DEFAULT_CARD_TITLE;
+    const title = String(values.title ?? '').trim();
     const tags = normalizeTags(values.tags);
     const content = String(values.content ?? '');
     setState((prev) => {
@@ -375,7 +389,7 @@ export default function KnowledgeBase() {
   function handleUpdate(cardId, values) {
     const nowIso = new Date().toISOString();
     const patch = {
-      title: String(values.title ?? '').trim() || DEFAULT_CARD_TITLE,
+      title: String(values.title ?? '').trim(),
       tags: normalizeTags(values.tags),
       content: String(values.content ?? ''),
       updatedAt: nowIso,
@@ -424,7 +438,9 @@ export default function KnowledgeBase() {
       })),
     }));
     if (activeCardId === cardId) setActiveCardId(null);
-    if (card) messageApi.success(`已删除知识「${card.title}」`);
+    if (card) {
+      messageApi.success(card.title ? `已删除知识「${card.title}」` : '已删除该知识卡片');
+    }
     saveUsage('删除知识', card?.title ?? '');
   }
 
@@ -536,6 +552,7 @@ export default function KnowledgeBase() {
               defaultCategoryName={
                 state.categories.find((c) => c.id === state.defaultCategoryId)?.name ?? ''
               }
+              highlightTokens={detailHighlight}
               onBack={() => setActiveCardId(null)}
               onSave={(values) => handleUpdate(activeCard.id, values)}
               onDelete={() => handleDelete(activeCard.id)}

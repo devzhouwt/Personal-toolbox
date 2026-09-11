@@ -6,7 +6,7 @@ const { TextArea } = Input;
 /**
  * 新建/编辑知识卡片共用弹窗。
  *
- * 表单值：title（可选，0~100 字符，留空由入口层兜底为「未命名知识」）、tags（Select mode="tags"，1~20 个、每个 1~30 字符，
+ * 表单值：title（可选，0~100 字符，留空时保存为空标题、卡片不显示标题区域）、tags（Select mode="tags"，1~20 个、每个 1~30 字符，
  * 由 knowledgeBase 入口层 normalizeTags 负责去重/裁剪兜底）、categoryName（Select，默认选中
  * 默认分类）、content（富文本/纯文本，必填）。校验通过后调用 onFinish，由父级闭包决定
  * 是新增（handleCreate）还是编辑（handleUpdate）。
@@ -59,7 +59,7 @@ export default function CardEditModal({ open, initial, categories, defaultCatego
         <Form.Item
           name="title"
           label="标题"
-          extra="可不填，留空将保存为「未命名知识」"
+          extra="可不填，留空则卡片不显示标题"
           rules={[{ max: 100, message: '标题不能超过 100 个字符' }]}
         >
           <Input placeholder="知识的标题，例如：Vite 别名配置" maxLength={100} showCount />

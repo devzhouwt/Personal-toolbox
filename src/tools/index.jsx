@@ -1,4 +1,5 @@
 import {
+  AccountBookOutlined,
   BookOutlined,
   CalendarOutlined,
   PictureOutlined,
@@ -6,6 +7,7 @@ import {
 import PngAlphaNormalize from './pngAlphaNormalize/PngAlphaNormalize';
 import CycleTracker from './cycleTracker/CycleTracker';
 import KnowledgeBase from './knowledgeBase/KnowledgeBase';
+import LoanLedger from './loanLedger/LoanLedger';
 
 /**
  * 工具注册表：新增工具时只需在此添加一条记录，并实现对应的组件。
@@ -40,6 +42,14 @@ const tools = [
     desc: '按分类与标签记录知识卡片，支持多级搜索排序、最近回顾、冷门知识查询与 Gitee 云端存档。',
     icon: BookOutlined,
     component: KnowledgeBase,
+    tag: 'NEW',
+  },
+  {
+    path: '/tools/loan-ledger',
+    name: '借贷账簿',
+    desc: '记录借贷往来：出借人、借款人、总金额与还款日期；支持分次还款并自动计算剩余金额、逾期天数与结清状态。',
+    icon: AccountBookOutlined,
+    component: LoanLedger,
     tag: 'NEW',
   },
 ];
