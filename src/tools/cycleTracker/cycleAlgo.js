@@ -70,17 +70,21 @@ export function collectEventDates(records, eventId) {
  * 以相邻两次发生的间隔为样本，越靠近当前的间隔权重越大（线性递增），
  * 从而让近期节奏变化更快地反映到推算结果中。
  * @param {string[]} dates 升序日期 key，至少 2 个才能形成间隔
+ * @param {{ workdayDiff: (a: string, b: string) => number } | null} engine
+ *   节假日日历传入工作日引擎（间隔按工作日计）；普通日历传 null（按自然日计）
  * @returns {{ count: number, cycle: number|null, lastDate: string|null }}
- *          cycle 为加权平均天数（保留 1 位小数），不足 2 条记录时为 null
+ *          cycle 为加权平均（保留 1 位小数），不足 2 条记录时为 null
  */
-export function calcCycle(dates) {
+export function calcCycle(dates, engine = null) {
   const count = dates.length;
   if (count === 0) return { count, cycle: null, lastDate: null };
   if (count === 1) return { count, cycle: null, lastDate: dates[0] };
 
   const intervals = [];
   for (let i = 1; i < count; i += 1) {
-    intervals.push(diffDays(dates[i - 1], dates[i]));
+    intervals.push(
+      engine ? engine.workdayDiff(dates[i - 1], dates[i]) : diffDays(dates[i - 1], dates[i])
+    );
   }
   // 线性加权：最近一次间隔权重最大
   let weightedSum = 0;
@@ -97,16 +101,70 @@ export function calcCycle(dates) {
 /**
  * 由最后一次发生日期与周期推算未来发生日期序列。
  * @param {string} lastDate 最后一次发生的日期 key
- * @param {number} cycle 周期（天）
- * @param {number} horizonDays 推算时间跨度（默认约 2 年）
- * @returns {string[]} 未来日期 key 升序（不含 lastDate）
+ * @param {number} cycle 周期（普通日历为自然日天数；节假日日历为工作日数）
+ * @param {number} horizonDays 推算时间跨度（默认约 2 年，自然日口径）
+ * @param {{ addWorkdays: (key: string, n: number) => string } | null} engine
+ *   节假日日历传入工作日引擎（预测自动跳过周末与法定节假日、调休日按工作日计）；
+ *   普通日历传 null（按自然日推进）
+ * @returns {string[]} 未来日期 key 升序（不含 lastDate；工作日模式下落地日均为工作日）
  */
-export function genPredictions(lastDate, cycle, horizonDays = 730) {
+export function genPredictions(lastDate, cycle, horizonDays = 730, engine = null) {
   if (!cycle || cycle <= 0) return [];
   const predictions = [];
+  if (engine) {
+    // 工作日模式：第 k 次预测 = 从上次记录推进 round(周期×k) 个工作日；
+    // k 以 horizonDays 为上限兜底，避免周期极小时的无界循环
+    for (let k = 1; k <= horizonDays; k += 1) {
+      const offset = Math.round(cycle * k);
+      if (offset < 1) continue;
+      const landing = engine.addWorkdays(lastDate, offset);
+      if (diffDays(lastDate, landing) > horizonDays) break;
+      predictions.push(landing);
+    }
+    return predictions;
+  }
   // k 从 1 起，round(cycle * k) 避免多次累加导致的取整误差累积
   for (let k = 1; ; k += 1) {
     const offset = Math.round(cycle * k);
+    if (offset > horizonDays) break;
+    predictions.push(addDaysKey(lastDate, offset));
+  }
+  return predictions;
+}
+
+/** 是否为有效的规则类事件（kind='rule' 且间隔合法） */
+export function isRuleEvent(event) {
+  return event?.kind === 'rule' && Number.isFinite(event.intervalDays) && event.intervalDays >= 1;
+}
+
+/**
+ * 规则类事件的日期标记：以最近一次实际记录为锚点，按固定间隔向后标记。
+ * 不参考历史数据（规则固定）：哪怕某天因换班等「破坏规则」，后续事件仍按固定间隔
+ * 进行，只需记录新的实际日期即可从新锚点重算。间隔口径为「空隔时长」，且单位随
+ * 日历类型：普通日历为自然日（填 3 = 两次之间空隔 3 天、日差 4 天，如 1号 → 5号 → 9号）；
+ * 节假日日历为工作日（自动跳过周末与法定节假日、调休日计为工作日）。
+ * @param {string} lastDate 最近一次实际记录的日期 key（锚点）
+ * @param {number} intervalDays 事件间隔（空隔时长，>= 1）
+ * @param {number} horizonDays 标记时间跨度（默认约 2 年，自然日口径）
+ * @param {{ addWorkdays: (key: string, n: number) => string } | null} engine
+ *   节假日日历传入工作日引擎（间隔与标记按工作日）；普通日历传 null（自然日）
+ * @returns {string[]} 未来日期 key 升序（不含 lastDate；工作日模式下均为工作日）
+ */
+export function genRulePredictions(lastDate, intervalDays, horizonDays = 730, engine = null) {
+  if (!Number.isFinite(intervalDays) || intervalDays < 1) return [];
+  const step = Math.round(intervalDays) + 1;
+  const predictions = [];
+  if (engine) {
+    // 工作日口径：第 k 次标记 = 从锚点推进 step×k 个工作日
+    for (let k = 1; k <= horizonDays; k += 1) {
+      const landing = engine.addWorkdays(lastDate, step * k);
+      if (diffDays(lastDate, landing) > horizonDays) break;
+      predictions.push(landing);
+    }
+    return predictions;
+  }
+  for (let k = 1; ; k += 1) {
+    const offset = step * k;
     if (offset > horizonDays) break;
     predictions.push(addDaysKey(lastDate, offset));
   }
@@ -117,18 +175,33 @@ export function genPredictions(lastDate, cycle, horizonDays = 730) {
  * 汇总某日历内全部事件的推算结果与预测日期索引。
  * @param {object[]} events 事件定义数组
  * @param {object[]} records 记录数组
+ * @param {{ engine?: object|null }} [options] engine：节假日日历的工作日引擎，
+ *   传入时间隔统计与预测均按工作日（跳过周末与法定节假日、调休日计为工作日）；
+ *   缺省或 null 时保持自然日逻辑（普通日历）。
+ *   规则类事件（kind='rule'）不参与加权推算，按固定间隔标记（间隔单位随日历类型：
+ *   普通日历为自然日、节假日日历为工作日），以最近一次实际记录为锚点，不参考更早的历史数据。
  * @returns {{ analyses: object, predictedByDate: object }}
  *   analyses: eventId → { count, cycle, lastDate, nextDate, overdueDays, predictions }
  *   predictedByDate: 'YYYY-MM-DD' → eventId[]
  */
-export function buildAnalyses(events, records) {
+export function buildAnalyses(events, records, { engine = null } = {}) {
   const analyses = {};
   const predictedByDate = {};
 
   events.forEach((event) => {
     const dates = collectEventDates(records, event.id);
-    const { count, cycle, lastDate } = calcCycle(dates);
-    const predictions = lastDate && cycle ? genPredictions(lastDate, cycle) : [];
+    const count = dates.length;
+    const lastDate = count > 0 ? dates[count - 1] : null;
+    let cycle = null;
+    let predictions = [];
+    if (isRuleEvent(event)) {
+      // 规则类事件：固定间隔（单位随日历类型），从最近一次实际记录起标记，不参考历史数据
+      cycle = Math.round(event.intervalDays);
+      if (lastDate) predictions = genRulePredictions(lastDate, cycle, 730, engine);
+    } else {
+      cycle = calcCycle(dates, engine).cycle;
+      predictions = lastDate && cycle ? genPredictions(lastDate, cycle, 730, engine) : [];
+    }
     predictions.forEach((key) => {
       (predictedByDate[key] ||= []).push(event.id);
     });

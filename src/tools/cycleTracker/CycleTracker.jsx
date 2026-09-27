@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Modal, Spin, Typography, message } from 'antd';
-import { isGiteeConfigured, getToolHistory, recordToolUsage } from '../../services/history';
+import { isGiteeConfigured } from '../../services/history';
 import {
   loadData,
   saveData,
@@ -12,9 +12,6 @@ import CalendarList from './CalendarList';
 import CalendarDetail from './CalendarDetail';
 
 const { Text } = Typography;
-
-/** 工具存档目录名（对应 Gitee 仓库 history/ 下的子目录） */
-const TOOL_ID = 'cycle-tracker';
 
 /** 数据快照（JSON 字符串），用于判断数据是否变化、是否已同步 */
 const snapshot = (calendars) => JSON.stringify({ calendars });
@@ -28,7 +25,6 @@ const snapshot = (calendars) => JSON.stringify({ calendars });
  *   若浏览器本地缓存有旧数据，则弹窗询问「上传本地存档 / 忽略本地新建空档」；
  *   之后每次数据变更自动推送（串行队列避免并发写冲突）。
  *   云端不可用（读取/写入失败，如令牌失效、断网）时回退浏览器本地存档并明确提示。
- * 关键操作（建日历/加事件/记日期）同时按项目惯例追加为 Gitee 使用历史。
  */
 export default function CycleTracker() {
   const [messageApi, contextHolder] = message.useMessage();
@@ -38,9 +34,6 @@ export default function CycleTracker() {
   const [loading, setLoading] = useState(isGiteeConfigured());
   // 存档同步状态：local | ok | syncing | error
   const [syncState, setSyncState] = useState('local');
-  const [historyRecords, setHistoryRecords] = useState([]);
-  const [historyLoading, setHistoryLoading] = useState(false);
-  const [historyError, setHistoryError] = useState(null);
 
   // 初始化（拉取存档）完成前不触发自动持久化
   const initializedRef = useRef(false);
@@ -200,34 +193,6 @@ export default function CycleTracker() {
       });
   }
 
-  /** 从 Gitee 仓库加载本工具的使用历史（未配置时不报错） */
-  async function loadHistory() {
-    if (!isGiteeConfigured()) return;
-    setHistoryLoading(true);
-    setHistoryError(null);
-    try {
-      const data = await getToolHistory(TOOL_ID);
-      setHistoryRecords(data?.records ?? []);
-    } catch (err) {
-      setHistoryError(err.message);
-    } finally {
-      setHistoryLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    loadHistory();
-  }, []);
-
-  /** 追加使用历史到 Gitee 仓库（未配置或失败均静默，不阻断主流程） */
-  async function saveUsage(action, title) {
-    try {
-      await recordToolUsage(TOOL_ID, { action, title });
-    } catch {
-      // 历史同步失败不影响工具使用
-    }
-  }
-
   /** 更新某日历（不可变 patch 合并） */
   const patchCalendar = useCallback((id, patch) => {
     setCalendars((prev) =>
@@ -235,11 +200,16 @@ export default function CycleTracker() {
     );
   }, []);
 
-  /** 新建日历并进入 */
-  async function handleCreate(name) {
+  /**
+   * 新建日历并进入。
+   * @param {string} name 日历名称
+   * @param {'normal'|'holiday'} type 日历类型：normal=普通日历（自然日）；holiday=节假日日历（工作日，跳过周末与法定节假日、调休日计为工作日）
+   */
+  function handleCreate(name, type) {
     const calendar = {
       id: genId(),
       name,
+      type: type === 'holiday' ? 'holiday' : 'normal',
       createdAt: new Date().toISOString(),
       events: [],
       records: [],
@@ -248,28 +218,24 @@ export default function CycleTracker() {
     setActiveId(calendar.id);
     // 创建后视图立即切到详情页，因此在本组件（常驻 context）内提示
     messageApi.success(`已创建日历「${name}」`);
-    await saveUsage('新建日历', name);
   }
 
   /** 重命名日历 */
-  async function handleRename(id, name) {
+  function handleRename(id, name) {
     patchCalendar(id, { name });
-    await saveUsage('重命名日历', name);
   }
 
   /** 删除日历（含其全部事件与记录） */
-  async function handleDelete(id) {
+  function handleDelete(id) {
     const cal = calendars.find((c) => c.id === id);
     setCalendars((prev) => prev.filter((c) => c.id !== id));
     if (activeId === id) setActiveId(null);
     if (cal) messageApi.success(`已删除日历「${cal.name}」`);
-    await saveUsage('删除日历', cal?.name ?? '');
   }
 
   /** 导入存档：整体替换当前数据（随后自动持久化推送） */
-  async function handleImport(imported) {
+  function handleImport(imported) {
     setCalendars(imported);
-    await saveUsage('导入存档', `共 ${imported.length} 个日历`);
   }
 
   // 每次进入工具时校验 activeId 有效性（日历可能已被删除）
@@ -298,7 +264,6 @@ export default function CycleTracker() {
           onBack={() => setActiveId(null)}
           onPatch={patchCalendar}
           onDelete={handleDelete}
-          onUsage={saveUsage}
         />
       ) : (
         <CalendarList
@@ -309,9 +274,6 @@ export default function CycleTracker() {
           onDelete={handleDelete}
           onOpen={setActiveId}
           onImport={handleImport}
-          historyRecords={historyRecords}
-          historyLoading={historyLoading}
-          historyError={historyError}
         />
       )}
     </div>

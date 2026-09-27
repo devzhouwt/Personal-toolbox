@@ -12,8 +12,10 @@
  *   version: 1,
  *   calendars: [
  *     {
- *       id, name, createdAt,
- *       events:  [{ id, name, color, createdAt }],            // 事件定义（如「生理期」+ 颜色）
+ *       id, name, type, createdAt,                            // type: 'normal'（缺省，兼容旧存档）| 'holiday'（节假日日历，按工作日推算）
+ *       events:  [{ id, name, color, kind, intervalDays, createdAt }],
+ *                // 事件定义；kind: 'predict'（缺省，按历史推算）| 'rule'（规则类，固定间隔自动标记），
+ *                // intervalDays: 规则类事件间隔（空隔时长，按日历口径：普通=自然日、节假日=工作日；同口径下日差 = 间隔 + 1）
  *       records: [{ date: 'YYYY-MM-DD', eventId }],           // 事件发生记录，date+eventId 唯一
  *     },
  *   ],

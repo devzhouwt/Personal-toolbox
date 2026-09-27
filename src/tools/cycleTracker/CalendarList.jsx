@@ -1,19 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  Alert,
   Button,
   Card,
   Col,
-  Divider,
   Empty,
   Form,
   Input,
-  List,
   Modal,
   Popconfirm,
+  Radio,
   Row,
   Space,
-  Spin,
   Tag,
   Tooltip,
   Typography,
@@ -26,20 +23,18 @@ import {
   DeleteOutlined,
   DownloadOutlined,
   EditOutlined,
-  HistoryOutlined,
   PlusOutlined,
   SyncOutlined,
   UploadOutlined,
   WarningOutlined,
 } from '@ant-design/icons';
 import { parseImported } from './storage';
-import { isGiteeConfigured } from '../../services/history';
 import { formatYMD } from './cycleAlgo';
 
 const { Paragraph, Text } = Typography;
 
 /**
- * 日历列表视图：新建/进入/重命名/删除日历，以及存档导出/导入与使用历史。
+ * 日历列表视图：新建/进入/重命名/删除日历，以及存档导出/导入。
  */
 export default function CalendarList({
   calendars,
@@ -49,9 +44,6 @@ export default function CalendarList({
   onDelete,
   onOpen,
   onImport,
-  historyRecords,
-  historyLoading,
-  historyError,
 }) {
   const [messageApi, contextHolder] = message.useMessage();
   const [nameModal, setNameModal] = useState(null); // { mode: 'create' } | { mode: 'rename', id, name }
@@ -78,13 +70,13 @@ export default function CalendarList({
     }
   }, [nameModal, form]);
 
-  /** 提交新建/重命名 */
+  /** 提交新建/重命名（重命名模式不含类型字段） */
   async function submitName() {
-    const { name } = await form.validateFields();
+    const { name, type } = await form.validateFields();
     const trimmed = name.trim();
     if (nameModal.mode === 'create') {
       // 创建后立即跳转详情页、本组件随之卸载，成功提示改由父级常驻 context 展示
-      await onCreate(trimmed);
+      await onCreate(trimmed, type);
     } else {
       await onRename(nameModal.id, trimmed);
       messageApi.success(`已重命名为「${trimmed}」`);
@@ -156,9 +148,12 @@ export default function CalendarList({
     <div>
       {contextHolder}
       <Paragraph type="secondary" style={{ marginBottom: 16 }}>
-        新建日历并持续记录周期性事件（如生理期、运动打卡），系统会根据你的历史数据用
-        <Text strong>加权滑动平均</Text>自动推算真实周期，并在日历中预测下一次发生的日期。
-        日历存档保存在你配置的 Gitee 仓库中（history/cycle-tracker/data.json，进入本工具时自动读取），浏览器本地同时保留缓存。
+        新建日历并持续记录周期性事件：添加事件时可选「预测类事件」（按历史数据用
+        <Text strong>加权滑动平均</Text>推算周期并预测下次日期）或「规则类事件」
+        （固定间隔自动标记后续日期，适合值班等固定排班，换班后记录实际日期即自动重算）。
+        新建日历可选「普通日历」（按自然日推算）或「节假日日历」（按工作日推算，自动跳过周末与法定节假日、
+        识别调休日并标注节假日信息）。日历存档保存在你配置的 Gitee 仓库中（history/cycle-tracker/data.json，
+        进入本工具时自动读取），浏览器本地同时保留缓存。
       </Paragraph>
 
       <input
@@ -257,6 +252,7 @@ export default function CalendarList({
                     </div>
                   </div>
                   <Space size={[0, 8]} wrap>
+                    {calendar.type === 'holiday' && <Tag color="red">节假日日历</Tag>}
                     <Tag>{eventCount} 个事件</Tag>
                     <Tag>{recordCount} 条记录</Tag>
                   </Space>
@@ -271,9 +267,6 @@ export default function CalendarList({
           })}
         </Row>
       )}
-
-      <Divider />
-      <HistoryPanel records={historyRecords} loading={historyLoading} error={historyError} />
 
       <Modal
         title={nameModal?.mode === 'create' ? '新建日历' : '重命名日历'}
@@ -295,6 +288,20 @@ export default function CalendarList({
           >
             <Input placeholder="如：生理期记录" maxLength={20} autoFocus allowClear />
           </Form.Item>
+          {nameModal?.mode === 'create' && (
+            <Form.Item
+              name="type"
+              label="日历类型"
+              initialValue="normal"
+              rules={[{ required: true, message: '请选择日历类型' }]}
+              extra="普通日历按自然日推算；节假日日历按工作日推算（自动跳过周末与法定节假日、识别调休日），并标注节假日信息。"
+            >
+              <Radio.Group>
+                <Radio value="normal">普通日历</Radio>
+                <Radio value="holiday">节假日日历</Radio>
+              </Radio.Group>
+            </Form.Item>
+          )}
         </Form>
       </Modal>
     </div>
@@ -342,55 +349,4 @@ function SyncTag({ state }) {
       </Tag>
     </Tooltip>
   );
-}
-
-/** 历史记录面板：展示该工具在 Gitee 仓库中的操作记录 */
-function HistoryPanel({ records, loading, error }) {
-  return (
-    <div>
-      <Typography.Title level={5} style={{ marginTop: 0 }}>
-        <HistoryOutlined /> 使用记录
-        <Text type="secondary" style={{ fontSize: 12, fontWeight: 400, marginLeft: 8 }}>
-          自动保存至 Gitee 仓库，保留最近 20 次
-        </Text>
-      </Typography.Title>
-      {!isGiteeConfigured() ? (
-        <Alert
-          type="info"
-          showIcon
-          message="尚未配置 Gitee 仓库"
-          description="配置后，新建日历、添加事件、记录日期等关键操作将自动保存到指定仓库（history/ 目录下按工具分文件夹，保留最近 20 次）。点击右上角「Gitee 配置」开启。"
-        />
-      ) : loading ? (
-        <div style={{ textAlign: 'center', padding: 24 }}>
-          <Spin />
-        </div>
-      ) : error ? (
-        <Alert type="error" showIcon message="使用记录加载失败" description={error} />
-      ) : records.length === 0 ? (
-        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无使用记录" />
-      ) : (
-        <List
-          size="small"
-          dataSource={records}
-          renderItem={(item) => (
-            <List.Item>
-              <List.Item.Meta
-                title={`${formatTime(item.time)}｜${item.action}「${item.title ?? ''}」`}
-              />
-            </List.Item>
-          )}
-        />
-      )}
-    </div>
-  );
-}
-
-/** ISO 时间字符串 → 本地时间文本 */
-function formatTime(iso) {
-  try {
-    return new Date(iso).toLocaleString('zh-CN', { hour12: false });
-  } catch {
-    return iso;
-  }
 }
